@@ -1,0 +1,495 @@
+MatlabServer distributed computing framework
+--------------------------------------------
+./slaveRun.sh localhost 10000 localhost localhost
+ slaveRun('localhost', 10000);
+
+The framework is set up as a master-slave (referred to as 'server' and
+'slave' in the code) architecture that is essentially a map-reduce
+system.  To get started, this document will cover basic usage and
+examples.  To run the system, several steps need to be executed:
+
+1.  Start up a server instance of matlab.  This means starting up
+    MATLAB and initializing a server handle using:
+
+    server = Server(options);
+
+    Run 'help Server.Server' to learn about the available options.
+
+2.  Start up slave instances of matlab.  The slave instances are just
+    plain MATLAB instances running on other machines or in the
+    background.  You can start them by hand in another shell, or use
+    some of the provided scripts to start them automatically for large
+    numbers of slaves.  For debugging, it's suggested that you open one
+    server instance and a single slave instance in another shell/window
+    and run them by hand.  This will allow you to reconnect the slaves
+    and baby-sit the process while you're developing.
+
+3.  Once the slave instances are started, execute the slaveRun()
+    function on each slave to connect it to the server and begin
+    processing requests.  slaveRun() internally creates a Slave
+    handle, and then enters a "forever" loop that will wait for
+    requests, process them, and send back replies.
+
+4.  Execute requests on the server using Server.rpc().  This function
+    is a "remote procedure call".  It sends its arguments to the
+    slave, calls a specified function, then returns the slave's
+    results with a syntax that mimics a local function call.
+
+----------------
+Example setup:
+
+1.  Start MATLAB in one shell and type:
+
+    options.slavecount=2;
+    server=Server(options);
+
+    The server will occasionally print out a 'Waiting for slaves'
+    note.
+
+2.  Start MATLAB in a second shell and type:
+
+    slaveRun('localhost', 10000);
+
+    The function will not return (unless there's an error).  The first argument
+    is the host name of the server instance, and the second argument is the port.
+    10000 is the default used by the Server.  You can choose a different port
+    using the options structure (see the Server.Server help).
+
+3.  Start MATLAB in a third shell and run the same command as above.
+    This shell will be the second slave.
+
+    You should see in the first shell that the Server constructor has
+    returned and that MATLAB has returned to the prompt.  The server
+    is now ready to process requests on the 2 slave instances.
+
+    In the server shell (the server instance of MATLAB) you can now try
+    the examples to below.
+
+-------------
+
+The above method is the best way to develop and debug your code.  When
+you're ready to run on a large scale, you can use the slaveRun.sh script:
+
+$ ./slaveRun.sh
+
+  Usage: ./slaveRun.sh master_host port  [slave_hosts*]
+
+The script takes the master host and port as its first two arguments,
+followed optionally by the list of hosts for the slave instances.  If
+you don't list the host names, the script will take them from the file
+pointed to by $PBS_NODEFILE.  Also, you can supply SLAVERUN_HOST and
+SLAVERUN_PORT environment vars then omit the host and port parameters.
+
+Examples:
+
+# Run 2 slaves on the localhost connecting back to the local host.
+# This is essentially the same as the example setup above.
+./slaveRun.sh localhost 10000 localhost localhost
+
+# Run slaves on gryphon
+./slaveRun.sh gryphon1 10000 $(cat gryphNodes.txt)
+# Where gryphNodes.txt contains something like:
+gryphon1
+gryphon1
+gryphon2
+gryphon2
+gryphon3
+gryphon3
+
+You can also leave your 'server' idling somewhere and have it wait for
+connections from slaves that are launched via qsub: 
+
+# Run slaves through PBS: 
+qsub -q quicksail -v SLAVERUN_HOST=yggdrasil1,SLAVERUN_PORT=10000 -l nodes=12 ./slaveRun.sh
+
+-------------
+Example 1:
+
+>> Z = server.rpc('zeros', 2, 3);
+>> Z =
+
+    [2x3 double] [2x3 double]
+
+>> Z{1}
+ans =
+
+     0     0     0
+     0     0     0
+
+
+    This will execute the 'zeros' function on each slave with the
+    arguments 2,3 passed in.  The returned values from each slave are
+    stored in the cell array Z.  In particular, Z{1} is the result
+    from slave 1, Z{2} is the result from slave 2 (and so on for any
+    number of slaves).
+
+------------
+Example 2:
+
+>> Z = server.rpc('zeros', {2,3}, {4,5});
+>> Z =
+
+    [2x4 double] [3x5 double]
+
+    This runs 'zeros' on each slave, but rather than using the same
+    arguments for both slaves, it passes 2,4 to the first slave, and
+    3,5 to the second slave.  Note that in Example 1 the arguments
+    were implicitly converted to {2,2}, {3,3} internally.
+
+    Specifically: whenever the framework finds a single argument or a
+    singleton cell-array, the parameter value is given to all the
+    slaves.  For non-singleton cell arrays, each argument is given to
+    the corresponding slave.  The following is equivalent to Example 1
+    because the singleton cell arrays are copied to all slaves:
+
+>> Z = server.rpc('zeros', {2}, {3});
+
+    If you wish to pass [] as the value, enclose it in a cell array
+    like {[]}.
+
+-----------
+Example 3:
+
+   Slaves functions can also return multiple values as usual:
+
+>> [M,N]=server.rpc('size', { [1 2 3 4], [1 2]' });
+>> M
+M =
+    [1]    [2]
+
+>> N
+N =
+    [4]    [1]
+
+
+   This executes size([1 2 3 4]) on slave 1, and size([1 2]') on slave
+   2.  As with running size() locally, the [M,N]=size() syntax returns
+   the row and column dimensions in separate variables.  The main
+   difference is that, as with arguments, the outputs are cell arrays
+   with separate entries for each slave.  So M{1},N{1} is the
+   dimension of the matrix on slave 1, and M{2},N{2} is the dimension
+   of the matrix on slave 2.
+
+   Note: The number of output arguments is detected by the server code
+   and forwarded to the slave; thus the 'nargout' variable in slave
+   functions works as expected.
+
+-----------
+Example 4:
+
+
+   There are a few ways for slaves to manage their local data.  The
+   simplest (but cumbersome) way is using global variables.  Below is
+   a simplified version of code that loads patches from the TinyImages
+   dataset into the local slave memory.
+
+function result = slaveLoadTinyBatch(tinyFileName, batchStart, batchSize)
+  global state;  % import global state structure
+ 
+  % load data and format it
+  idx=batchStart:batchStart+batchSize-1;
+  X = loadTinyImages(idx, tinyFileName);
+  X = double(reshape(X, 32*32*3, length(idx))');
+
+  % store data and return result
+  state.X = X;
+  result=size(X,1);
+
+   This function loads a batch of images using the loadTinyImages
+   function into the local variable X.  To store X locally across
+   function calls to the slave, we store X in a global structure.  By
+   convention, I have been using 'state' as the global storage for
+   data and slave state, then using fields within this structure to
+   store variables.
+
+   In the example above, we store the image data to state.X before
+   returning the number of loaded patches to the server.
+  
+   To access this data in the future, we could use code like:
+
+function doSomethingWithTinyData()
+    global state;
+    myAlgorithm(state.X);
+
+   If you wanted to be able to specify the names of variables (rather than
+   hard coding things like 'X') you could use strings for variable names:
+   
+function doSomethingWithData(dataVarName)
+   global state;
+   myAlgorithm(state.(dataVarName))
+
+   The state.(dataVarName) syntax accesses the field specified by the
+   string dataVarName.
+
+------------
+Example 5:
+
+   A simpler way of interacting with slave data is built into the
+   system in the form of "slave references".  (This is my own hack, so
+   don't be too crazy with it --- but it works well for most simple
+   scenarios you'll probably care about.  See the section at the end
+   about 'How to orphan references'.)  References are indirect
+   references (like pointers) to data stored in slave instances.
+   These references can be returned to the server and used as
+   arguments to Server.rpc() calls, which thus allows the server to
+   seemlessly refer to slave data as though they were regular
+   variables residing on the server.
+
+   Slave references are created with the slaveRef() constructor
+   function in either slave code (so that a slave may create a
+   reference to some local data) or may be created by the server using
+   the Server.rpc() method in order to store persistent data on the
+   slave.
+
+   In a slave function:
+
+   function ref = loadSlaveData()
+      X = readMyData();
+      ref = slaveRef(X);
+   end
+
+   This function might read some data into the local variable X, then
+   deposit this data into the reference 'ref'.  slaveRef() stores the
+   data in a global location (state.refs) and assigns a unique index
+   to it, which is represented by 'ref'.  The server can later use
+   'ref' to refer to this data in another function call.
+
+   Caveat: though you can return structures and cell-arrays of
+   slaveRefs, you should never return two copies of the same slaveRef.
+   The server will not recognize that the two point to the same data
+   and will allocate separate handles for each copy (which will screw
+   up the garbage collection --- see below).  This applies across
+   calls as well: if you've returned a 'slaveRef' in a previous call,
+   don't store it in a global, then try to return it again later.
+   Best practice is probably to return a slaveRef exactly once, then
+   allow the server to manage it from that point forward.
+
+   On the server you can create slaveRefs remotely by invoking the
+   slaveRef constructor via RPC:
+
+>> magicRef = server.rpc('slaveRef', {magic(3), rand(5)})
+magicRef =
+
+    [1x1 serverRef]    [1x1 serverRef]
+
+   This call works as usual: slaveRef() is invoked on each slave with
+   the given arguments (magic(3) on slave 1, and rand(5) on slave 2),
+   and the results are returned in magicRef (one cell array entry for
+   each slave).  Obviously, this is only reasonable if the arguments
+   are small.  (Note: the 'serverRef' class is a wrapper for the
+   'slaveRef' class which handles resource cleanup --- see below.)
+
+   In either case, a returned reference can be used like other
+   arguments, but with special semantics:
+
+>> sums = server.rpc('sum', magicRef)
+
+sums =
+
+    [1x3 double]    [1x5 double]
+
+>> sums{1}
+
+ans =
+
+    15    15    15
+
+    The returned values are just the results of 'sum' as applied to
+    the data referred to by magicRef.  (Note that since magicRef is a
+    cell array, the references returned for each slave were passed
+    back to the same slave from whence they came.  Be careful not to
+    shuffle references: a reference from slave 1 is not a valid
+    reference (or may refer to the wrong data) on slave 2.)
+
+    A more practical example:
+
+>> X = server.rpc('slaveLoadTinyBatch', tinyFileName, {1,20001}, 20000);
+>> server.rpc('doSomethingWithTinyData', X);
+
+    In this case (unlike Example 4), doSomethingWithTinyData is a
+    slave function that can simply refer to the incoming argument as
+    it would normally.  The "dereference" of X occurs automatically:
+
+function doSomethingWithTinyData(data)
+    myAlgorithm(data); % runs myAlgorithm on X.
+
+
+    References can be deleted in two ways, both on the server.  (It's
+    not a good idea to delete references from slave code.)  The first
+    way is to use the MATLAB delete operator:
+
+    delete(ref);
+    
+    where ref is an instance of 'serverRef' (which is just a wrapper
+    for 'slaveRef's that appear on the server).  This will invalidate
+    any other copies of the reference on the server, and will send a
+    message to the appropriate slave causing the referenced data to be
+    freed.
+
+    Alternatively, if all copies of a reference are destroyed on the
+    server, delete is called automatically and will cause the remote
+    data to be freed.
+
+** How to Orphan References **
+
+   There are lots of ways to orphan references that you should avoid
+   (some already mentioned).  Don't do the following:
+
+   1.  Create a slave reference that is ignored by the caller.
+   (The server will never receive the reference, and thus can never
+   cause it to be freed.)
+
+   2.  Return multiple copies of the same reference.  (The server
+   doesn't know how to recognize the copies --- so reference counting
+   will not work properly.)
+
+   3.  Delete a reference on the slave after it has been returned to
+   the server.  (There is no way to notify the server that its
+   references are invalid.)
+
+   Maybe I'll figure how to fix these things in the future...
+
+-------------
+
+Example 6:
+
+   A common operation is to execute a piece of code on each slave and
+   sum up the results (e.g., during batch gradient descent).  The
+   following incantation makes this fairly easy:
+
+  M = server.rpc('rand', 10); % generate 10x10 matrix on each slave.
+  Msum = sum(cell2mat(reshape(M, 1,1, server.slaveCount)),3);
+
+  The second line reshapes the returned cell array M to be
+  1x1xslaveCount.  Converting this cell array to a matrix results in a
+  stack of 10x10 matrices, which are then summed along the 3rd
+  dimension.
+
+-------------
+
+Example 7:
+
+  You can use 'minFunc' straight-forwardly by implementing your
+  loss/gradient computation function to perform the computations
+  on the slaves, then sum up the results before returning.  An example
+  of such a function is in the softmax/ directory.  You can demo the
+  code like this using 2 slaves:
+
+% set up data for 4-class classification
+N=50;
+M=5000;
+c1=[bsxfun(@plus, randn(M,N), 0.5*randn(1, N)), ones(M,1)];
+c2=[bsxfun(@plus, randn(M,N), 0.5*randn(1, N)), ones(M,1)];
+c3=[bsxfun(@plus, randn(M,N), 0.5*randn(1, N)), ones(M,1)];
+c4=[bsxfun(@plus, randn(M,N), 0.5*randn(1, N)), ones(M,1)];
+N=N+1; % intercept got added
+K=4;
+
+% copy data sets to two slaves
+X = server.rpc('slaveRef', {[c1;c2], [c3;c4]});
+y = server.rpc('slaveRef', {[ones(M,1); 2*ones(M,1)], [3*ones(M,1); 4*ones(M,1)]});
+
+% run minFunc
+w = minFunc(@softmaxLoss, zeros((K-1)*N,1), struct('MaxIter',100), server, X, y, K);
+clear X; clear y; % free memory on slaves.
+
+% print training error
+w = [reshape(w, N, K-1), zeros(N,1)];
+[val,ytrain] = max([c1;c2;c3;c4]*w, [], 2);
+y = [ones(M,1); 2*ones(M,1); 3*ones(M,1); 4*ones(M,1)];
+fprintf(1, 'Training error:  %f%%\n', 100*sum(ytrain ~= y)/length(y));
+
+-----------
+
+Example 8:
+
+For simple operations, you can also use anonymous functions.  This is useful
+for performing a set of simple operations in one call, and works well with
+slave references:
+
+% This will generate 2 columns of 100000 random numbers on each slave.
+X = server.rpc('@(varargin) slaveRef(randn(varargin{:}))', 100000,2);
+
+% compute the covariance of the columns using 'cov' on each slave.
+covEasy = server.rpc('cov', X);
+mean(cell2mat(reshape(covEasy, 1,1, server.slaveCount)),3)
+
+% compute the covariance using sufficient statistics from each slave:
+[counts,sums,sumSqrs] = server.rpc('@(X) deal(size(X,1),sum(X)'',X''*X)', X);
+counts=sum(cell2mat(reshape(counts, 1,1, server.slaveCount)),3);
+sums=sum(cell2mat(reshape(sums, 1,1, server.slaveCount)),3);
+sumSqrs=sum(cell2mat(reshape(sumSqrs, 1,1, server.slaveCount)),3);
+
+(sumSqrs - sums*sums'/counts)/(counts-1)
+
+
+-----------
+
+Example 9:
+
+Some boiler-plate operations for reducing the returned slave values
+are also included.  rpcsum() sums up the results of all the slaves
+(for each output argument).  So a more succinct form of the second
+version above is:
+
+[counts,sums,sumSqrs] = server.rpcsum('@(X) deal(size(X,1),sum(X)'',X''*X)', X);
+(sumSqrs - sums*sums'/counts)/(counts-1)
+
+-----------
+
+Tips:
+
+1.  If your program needs randomness, each slave will likely start up
+    with the same random seed.  You can use the slaveRandSeed function to
+    seed the random number generators on each machine:
+    
+    % seed each slave with values from /dev/urandom:
+    server.rpc('slaveRandSeed');
+
+    % seed each slave with random numbers from server:
+    server.rpc('slaveRandSeed', num2cell(randi(2^32,1,server.slaveCount)));
+
+2.  Be careful with memory consumption.  With 8 matlab instances
+running it's easy to cause a machine to start swapping (which, aside
+from being inefficient, is bad for the disks and prevents people from
+logging in).  A major culprit for unexpected memory allocation is
+temporaries.  Here's an example from the distributed K-means code:
+
+    [val,labels] = max(bsxfun(@minus,centroids*X',0.5*sum(centroids.^2,2)));
+
+This function computes the cluster assignments by generating the
+entire distance matrix (excluding the X.^2 part).  The centroids*X'
+term requires O(K*M) space for K clusters and M examples.
+
+Obviously, however, this entire matrix does not need to exist at once.
+It is easy to reduce the memory needed at nearly zero cost by batching
+the computation:
+
+  c2 = 0.5*sum(centroids.^2,2);
+  
+  BATCH_SIZE=1000;
+  label=zeros(size(X,1),1);
+  for i=1:BATCH_SIZE:size(X,1)
+    lastInd=min(i+BATCH_SIZE-1, size(X,1));
+    [val,somelabels] = max(bsxfun(@minus,centroids*X(i:lastInd,:)',c2));
+    label(i:lastInd) = somelabels;
+  end
+
+This code uses O(K * BATCH_SIZE) space and is no slower.  (Note that
+this 'batching' is within each process --- it has nothing to do with
+the server/slave code.)
+
+3.  If you're getting errors about "X11 connection rejected because of
+wrong authentication" while starting remote jobs, try the following:
+
+      a.  rm -f ~/.Xauthority*
+          Log out, then log in and try again.
+
+      b.  If that fails, try:
+          Log out and in until xauth regenerates the .Xauthority* files.
+          restorecon -v .Xauthority*
+          Log out, then log in and try again.
+
+The 'restorecon' command on ai and robo resets some security settings
+that can interfere with ssh/X11 forwarding.
+
