@@ -1,6 +1,6 @@
-# LSTM_MATLAB
+# LSTM-MATLAB
 
-LSTM_MATLAB is Long Short-term Memory (LSTM) in MATLAB, which is meant to be succinct, illustrative and for research purpose only. It is accompanied with a paper for reference: [Revisit Long Short-Term Memory: An Optimization Perspective], NIPS deep learning workshop, 2014. 
+LSTM-MATLAB is Long Short-term Memory (LSTM) in MATLAB, which is meant to be succinct, illustrative and for research purpose only. It is accompanied with a paper for reference: [Revisit Long Short-Term Memory: An Optimization Perspective], NIPS deep learning workshop, 2014. 
 
 Creater & Maintainer
 Qi Lyu
