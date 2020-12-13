@@ -30,6 +30,5 @@ License
 MIT
 
 
-[Revisit Long Short-Term Memory: An Optimization Perspective]:http://bigml.cs.tsinghua.edu.cn/~jun/pub/lstm-parallel.pdf
-
+[Revisit Long Short-Term Memory: An Optimization Perspective]:http://ml.cs.tsinghua.edu.cn/~jun/pub/lstm-parallel.pdf
 [C++ version]:https://github.com/huashiyiqike/NETLAB/blob/master/layernet/core/layer-inl.hpp
